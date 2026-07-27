@@ -26,7 +26,7 @@ function send(ws, message) {
 function publicPlayer(entry) {
   return {
     playerId: entry.playerId,
-    nickname: entry.nickname,
+    nickname: `Human Player ${entry.displayNumber}`,
     tier: entry.tier,
     wins: entry.wins,
     losses: entry.losses,
@@ -54,6 +54,13 @@ function cleanText(value, fallback, max = 40) {
 
 function getPlayer(playerId) {
   return players.get(String(playerId || ""));
+}
+
+function nextDisplayNumber() {
+  const used = new Set([...players.values()].map(player => player.displayNumber));
+  let number = 1;
+  while (used.has(number)) number++;
+  return number;
 }
 
 function fail(ws, code, message) {
@@ -105,13 +112,15 @@ wss.on("connection", ws => {
       if (!playerId) return ws.close(1008, "Missing player ID");
 
       const previous = getPlayer(playerId);
+      const displayNumber = previous?.displayNumber || nextDisplayNumber();
       if (previous && previous.ws !== ws) previous.ws.close(4001, "Signed in elsewhere");
 
       ws.playerId = playerId;
       players.set(playerId, {
         ws,
         playerId,
-        nickname: cleanText(data.nickname, "Sagemon"),
+        nickname: `Human Player ${displayNumber}`,
+        displayNumber,
         tier: cleanText(data.tier, "Unranked", 20),
         wins: Math.max(0, Number(data.wins) || 0),
         losses: Math.max(0, Number(data.losses) || 0),
@@ -130,7 +139,6 @@ wss.on("connection", ws => {
     if (!player) return fail(ws, "NOT_JOINED", "Join before sending game messages.");
 
     if (data.type === "profile") {
-      player.nickname = cleanText(data.nickname, player.nickname);
       player.tier = cleanText(data.tier, player.tier, 20);
       player.wins = Math.max(0, Number(data.wins) || 0);
       player.losses = Math.max(0, Number(data.losses) || 0);
