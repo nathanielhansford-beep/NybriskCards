@@ -1,283 +1,248 @@
+const http = require("http");
+const { randomUUID } = require("crypto");
 const { WebSocketServer, WebSocket } = require("ws");
 
-const wss = new WebSocketServer({
-    port: process.env.PORT || 8080
-});
-
+const port = Number(process.env.PORT) || 8080;
 const players = new Map();
-const npcs = new Map();
+const challenges = new Map();
+const matches = new Map();
 
-function broadcast(message, exceptWs = null) {
-    const payload =
-        typeof message === "string"
-            ? message
-            : JSON.stringify(message);
-
-    for (const client of wss.clients) {
-        if (
-            client !== exceptWs &&
-            client.readyState === WebSocket.OPEN
-        ) {
-            client.send(payload);
-        }
-    }
-}
-
-wss.on("connection", (ws) => {
-    console.log("Player connected");
-
-    ws.isAlive = true;
-
-    ws.on("pong", () => {
-        ws.isAlive = true;
-    });
-
-    ws.on("message", (raw) => {
-        try {
-            const data = JSON.parse(raw.toString());
-
-            if (data.type === "join") {
-                const playerId = String(data.playerId || "");
-
-                if (!playerId) {
-                    ws.close(1008, "Missing player ID");
-                    return;
-                }
-
-                ws.playerId = playerId;
-
-                const playerState = {
-                    playerId,
-                    nickname: data.nickname || "Pilot",
-                    x: Number(data.x) || 1600,
-                    y: Number(data.y) || 1100,
-                    hp: Number(data.hp) || 100,
-                    maxHp: Number(data.maxHp) || 100,
-                    sprite: data.sprite || "alien",
-                    facingX: Number(data.facingX) || 0,
-                    facingY: Number(data.facingY) || -1
-                };
-
-                players.set(playerId, {
-                    ws,
-                    state: playerState
-                });
-
-                // Give the joining player everyone already online.
-              ws.send(JSON.stringify({
-    type: "worldState",
-
-    players: [...players.values()]
-        .filter(entry => entry.ws !== ws)
-        .map(entry => entry.state),
-
-    npcs: [...npcs.values()]
-}));
-
-                // Tell everyone else about the new player.
-                broadcast({
-                    type: "playerJoined",
-                    player: playerState
-                }, ws);
-
-                console.log(`Player ${playerId} joined the global world`);
-                return;
-            }
-
-            if (!ws.playerId || !players.has(ws.playerId)) {
-                return;
-            }
-
-            const entry = players.get(ws.playerId);
-
-            if (data.type === "state") {
-                entry.state = {
-                    ...entry.state,
-                    x: Number(data.x) || 0,
-                    y: Number(data.y) || 0,
-                    hp: Number(data.hp) || 0,
-                    maxHp: Number(data.maxHp) || entry.state.maxHp,
-                    facingX: Number(data.facingX) || 0,
-                    facingY: Number(data.facingY) || -1,
-                    sprite: data.sprite || entry.state.sprite
-                };
-
-                broadcast({
-                    type: "state",
-                    playerId: ws.playerId,
-                    ...entry.state
-                }, ws);
-
-                return;
-            }
- if (data.type === "npcSpawn") {
-    const npcState = {
-        npcId: data.npcId,
-        npcFaction: data.npcFaction,
-        ownerId: ws.playerId,
-        x: Number(data.x) || 0,
-        y: Number(data.y) || 0,
-        w: Number(data.w) || 56,
-        h: Number(data.h) || 56,
-        hp: Number(data.hp) || 40,
-        maxHp: Number(data.maxHp) || 40,
-        fireCooldown: Number(data.fireCooldown) || 1800,
-        speed: Number(data.speed) || 2.5,
-        preferredDist: Number(data.preferredDist) || 280,
-        dmg: Number(data.dmg) || 10,
-        diff: Number(data.diff) || 1,
-        isDefense: !!data.isDefense,
-        angle: Number(data.angle) || 0,
-        state: data.state || null,
-        beamCharge: Number(data.beamCharge) || 0
-    };
-
-    npcs.set(npcState.npcId, npcState);
-
-    broadcast({
-        type: "npcSpawn",
-        ...npcState
-    }, ws);
-
+const server = http.createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, players: players.size, matches: matches.size }));
     return;
-}
-
-if (data.type === "npcState") {
-    const npc = npcs.get(data.npcId);
-
-    if (!npc) {
-        return;
-    }
-
-    // Only the client that spawned the NPC controls its movement.
-    if (npc.ownerId !== ws.playerId) {
-        return;
-    }
-
-    npc.x = Number(data.x) || 0;
-    npc.y = Number(data.y) || 0;
-    npc.hp = Math.max(0, Number(data.hp) || 0);
-    npc.angle = Number(data.angle) || 0;
-    npc.fireTimer = Number(data.fireTimer) || 0;
-    npc.state = data.state || npc.state;
-    npc.beamCharge = Number(data.beamCharge) || 0;
-
-    broadcast({
-        type: "npcState",
-        npcId: npc.npcId,
-        ownerId: npc.ownerId,
-        x: npc.x,
-        y: npc.y,
-        hp: npc.hp,
-        angle: npc.angle,
-        fireTimer: npc.fireTimer,
-        state: npc.state,
-        beamCharge: npc.beamCharge
-    }, ws);
-
-    return;
-}
- 
-         if (data.type === "npcDestroy") {
-    const npc = npcs.get(data.npcId);
-
-    if (!npc) {
-        return;
-    }
-
-    npcs.delete(data.npcId);
-
-    broadcast({
-        type: "npcDestroy",
-        npcId: data.npcId,
-        by: ws.playerId
-    });
-
-    return;
-}
-
-            if (data.type === "fire") {
-                broadcast({
-                    type: "fire",
-                    playerId: ws.playerId,
-                    shotId: data.shotId,
-                    x: data.x,
-                    y: data.y,
-                    angle: data.angle,
-                    damage: data.damage,
-                    firedAt: Date.now()
-                }, ws);
-
-                return;
-            }
-
-            if (data.type === "damage") {
-                broadcast({
-                    type: "damage",
-                    attackerId: ws.playerId,
-                    targetId: data.targetId,
-                    shotId: data.shotId,
-                    damage: data.damage
-                }, ws);
-
-                return;
-            }
-
-            if (data.type === "respawn") {
-                entry.state.x = Number(data.x) || 1600;
-                entry.state.y = Number(data.y) || 1100;
-                entry.state.hp =
-                    Number(data.hp) ||
-                    entry.state.maxHp;
-
-                broadcast({
-                    type: "respawn",
-                    playerId: ws.playerId,
-                    x: entry.state.x,
-                    y: entry.state.y,
-                    hp: entry.state.hp
-                }, ws);
-            }
-        } catch (error) {
-            console.error("Message error:", error);
-        }
-    });
-
-    ws.on("close", () => {
-        const playerId = ws.playerId;
-
-        if (playerId) {
-            players.delete(playerId);
-
-            broadcast({
-                type: "playerLeft",
-                playerId
-            });
-
-            console.log(`Player ${playerId} disconnected`);
-        }
-    });
-
-    ws.on("error", (error) => {
-        console.error("WebSocket error:", error);
-    });
+  }
+  res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+  res.end("Nybrisk PvP relay is online.");
 });
 
-// Remove connections that disappeared without closing cleanly.
+const wss = new WebSocketServer({ server, maxPayload: 256 * 1024 });
+
+function send(ws, message) {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+}
+
+function publicPlayer(entry) {
+  return {
+    playerId: entry.playerId,
+    nickname: entry.nickname,
+    tier: entry.tier,
+    wins: entry.wins,
+    losses: entry.losses,
+    status: entry.matchId ? "in_match" : "available"
+  };
+}
+
+function broadcast(message, except = null) {
+  for (const entry of players.values()) {
+    if (entry.ws !== except) send(entry.ws, message);
+  }
+}
+
+function broadcastRoster() {
+  broadcast({
+    type: "roster",
+    players: [...players.values()].map(publicPlayer)
+  });
+}
+
+function cleanText(value, fallback, max = 40) {
+  const text = String(value || "").trim().replace(/[\u0000-\u001f]/g, "");
+  return (text || fallback).slice(0, max);
+}
+
+function getPlayer(playerId) {
+  return players.get(String(playerId || ""));
+}
+
+function fail(ws, code, message) {
+  send(ws, { type: "error", code, message });
+}
+
+function removeChallengesFor(playerId) {
+  for (const [challengeId, challenge] of challenges) {
+    if (challenge.from === playerId || challenge.to === playerId) {
+      const otherId = challenge.from === playerId ? challenge.to : challenge.from;
+      send(getPlayer(otherId)?.ws, { type: "challengeCancelled", challengeId, playerId });
+      challenges.delete(challengeId);
+    }
+  }
+}
+
+function leaveMatch(playerId, reason = "left") {
+  const player = getPlayer(playerId);
+  const matchId = player?.matchId;
+  if (!matchId) return;
+  const match = matches.get(matchId);
+  if (match) {
+    const opponentId = match.players.find(id => id !== playerId);
+    const opponent = getPlayer(opponentId);
+    if (opponent) {
+      opponent.matchId = null;
+      send(opponent.ws, { type: "opponentLeft", matchId, playerId, reason });
+    }
+    matches.delete(matchId);
+  }
+  player.matchId = null;
+}
+
+wss.on("connection", ws => {
+  ws.isAlive = true;
+  ws.on("pong", () => { ws.isAlive = true; });
+
+  ws.on("message", raw => {
+    let data;
+    try {
+      data = JSON.parse(raw.toString());
+    } catch {
+      fail(ws, "BAD_JSON", "Message must be valid JSON.");
+      return;
+    }
+
+    if (data.type === "join") {
+      const playerId = cleanText(data.playerId, "", 128);
+      if (!playerId) return ws.close(1008, "Missing player ID");
+
+      const previous = getPlayer(playerId);
+      if (previous && previous.ws !== ws) previous.ws.close(4001, "Signed in elsewhere");
+
+      ws.playerId = playerId;
+      players.set(playerId, {
+        ws,
+        playerId,
+        nickname: cleanText(data.nickname, "Sagemon"),
+        tier: cleanText(data.tier, "Unranked", 20),
+        wins: Math.max(0, Number(data.wins) || 0),
+        losses: Math.max(0, Number(data.losses) || 0),
+        matchId: null
+      });
+      send(ws, {
+        type: "joined",
+        playerId,
+        players: [...players.values()].filter(entry => entry.playerId !== playerId).map(publicPlayer)
+      });
+      broadcastRoster();
+      return;
+    }
+
+    const player = getPlayer(ws.playerId);
+    if (!player) return fail(ws, "NOT_JOINED", "Join before sending game messages.");
+
+    if (data.type === "profile") {
+      player.nickname = cleanText(data.nickname, player.nickname);
+      player.tier = cleanText(data.tier, player.tier, 20);
+      player.wins = Math.max(0, Number(data.wins) || 0);
+      player.losses = Math.max(0, Number(data.losses) || 0);
+      broadcastRoster();
+      return;
+    }
+
+    if (data.type === "challenge") {
+      const target = getPlayer(data.targetId);
+      if (!target || target.playerId === player.playerId) return fail(ws, "PLAYER_UNAVAILABLE", "That player is no longer available.");
+      if (player.matchId || target.matchId) return fail(ws, "PLAYER_BUSY", "One of the players is already in a match.");
+      const duplicate = [...challenges.values()].some(challenge =>
+        (challenge.from === player.playerId && challenge.to === target.playerId) ||
+        (challenge.from === target.playerId && challenge.to === player.playerId)
+      );
+      if (duplicate) return fail(ws, "CHALLENGE_EXISTS", "A challenge is already pending.");
+
+      const challengeId = randomUUID();
+      const challenge = { challengeId, from: player.playerId, to: target.playerId, createdAt: Date.now() };
+      challenges.set(challengeId, challenge);
+      send(target.ws, { type: "challengeReceived", challengeId, from: publicPlayer(player) });
+      send(ws, { type: "challengeSent", challengeId, to: publicPlayer(target) });
+      return;
+    }
+
+    if (data.type === "challengeResponse") {
+      const challenge = challenges.get(String(data.challengeId || ""));
+      if (!challenge || challenge.to !== player.playerId) return fail(ws, "CHALLENGE_EXPIRED", "That challenge is no longer available.");
+      challenges.delete(challenge.challengeId);
+      const challenger = getPlayer(challenge.from);
+      if (!challenger) return fail(ws, "PLAYER_UNAVAILABLE", "The challenger disconnected.");
+
+      if (!data.accepted) {
+        send(challenger.ws, { type: "challengeDeclined", challengeId: challenge.challengeId, by: publicPlayer(player) });
+        send(ws, { type: "challengeClosed", challengeId: challenge.challengeId });
+        return;
+      }
+
+      if (player.matchId || challenger.matchId) return fail(ws, "PLAYER_BUSY", "One of the players is already in a match.");
+      const matchId = randomUUID();
+      const firstPlayerId = Math.random() < 0.5 ? challenger.playerId : player.playerId;
+      const match = { matchId, players: [challenger.playerId, player.playerId], firstPlayerId, createdAt: Date.now() };
+      matches.set(matchId, match);
+      challenger.matchId = matchId;
+      player.matchId = matchId;
+      send(challenger.ws, { type: "matchStarted", matchId, opponent: publicPlayer(player), firstPlayerId });
+      send(player.ws, { type: "matchStarted", matchId, opponent: publicPlayer(challenger), firstPlayerId });
+      broadcastRoster();
+      return;
+    }
+
+    if (data.type === "matchAction" || data.type === "matchState") {
+      const match = matches.get(player.matchId);
+      if (!match || data.matchId !== match.matchId) return fail(ws, "MATCH_NOT_FOUND", "Match is no longer active.");
+      const opponentId = match.players.find(id => id !== player.playerId);
+      send(getPlayer(opponentId)?.ws, {
+        type: data.type,
+        matchId: match.matchId,
+        from: player.playerId,
+        sequence: Math.max(0, Number(data.sequence) || 0),
+        payload: data.payload ?? null
+      });
+      return;
+    }
+
+    if (data.type === "matchEnd") {
+      const matchId = player.matchId;
+      if (!matchId) return;
+      const match = matches.get(matchId);
+      const opponentId = match?.players.find(id => id !== player.playerId);
+      send(getPlayer(opponentId)?.ws, { type: "matchEnded", matchId, by: player.playerId, result: data.result || null });
+      leaveMatch(player.playerId, "match_end");
+      broadcastRoster();
+      return;
+    }
+
+    if (data.type === "leaveMatch") {
+      leaveMatch(player.playerId, "left");
+      broadcastRoster();
+    }
+  });
+
+  ws.on("close", () => {
+    const playerId = ws.playerId;
+    if (!playerId || getPlayer(playerId)?.ws !== ws) return;
+    removeChallengesFor(playerId);
+    leaveMatch(playerId, "disconnected");
+    players.delete(playerId);
+    broadcastRoster();
+  });
+
+  ws.on("error", error => console.error("WebSocket error:", error));
+});
+
 const heartbeat = setInterval(() => {
-    for (const ws of wss.clients) {
-        if (!ws.isAlive) {
-            ws.terminate();
-            continue;
-        }
-
-        ws.isAlive = false;
-        ws.ping();
+  const cutoff = Date.now() - 60_000;
+  for (const [challengeId, challenge] of challenges) {
+    if (challenge.createdAt < cutoff) {
+      send(getPlayer(challenge.from)?.ws, { type: "challengeExpired", challengeId });
+      send(getPlayer(challenge.to)?.ws, { type: "challengeExpired", challengeId });
+      challenges.delete(challengeId);
     }
-}, 30000);
+  }
+  for (const ws of wss.clients) {
+    if (!ws.isAlive) {
+      ws.terminate();
+      continue;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 30_000);
 
-wss.on("close", () => {
-    clearInterval(heartbeat);
-});
-
-console.log("Global PvP relay server running");
+wss.on("close", () => clearInterval(heartbeat));
+server.listen(port, () => console.log(`Nybrisk PvP relay listening on ${port}`));
